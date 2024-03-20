@@ -26,7 +26,7 @@ fn main() {
                     }
                     _ => {
                         let _ = stream
-                            .write(b"HTTP/1.1 400 Not Found\r\n\r\n")
+                            .write(b"HTTP/1.1 404 Not Found\r\n\r\n")
                             .expect("Error write stream");
                     }
                 };

@@ -27,7 +27,7 @@ fn main() {
                             .expect("Error write stream");
                     }
                     "echo" => {
-                        let value = path[2];
+                        let value = path[2..].join(" ");
                         let _ = stream 
                             .write(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",value.len(), value).as_bytes())
                             .expect("Error write stream");

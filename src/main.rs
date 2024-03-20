@@ -21,12 +21,12 @@ fn main() {
                 match part {
                     "/" => {
                         let _ = stream
-                            .write(b"HTTP/1.1 200 OK\r\nHALO\r\n\r\n")
+                            .write(b"HTTP/1.1 200 OK\r\n\r\n")
                             .expect("Error write stream");
                     }
                     _ => {
                         let _ = stream
-                            .write(b"HTTP/1.1 400 Not Found\r\nHALO\r\n\r\n")
+                            .write(b"HTTP/1.1 400 Not Found\r\n\r\n")
                             .expect("Error write stream");
                     }
                 };

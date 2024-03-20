@@ -1,5 +1,5 @@
 use std::str;
-use std::{io::Read, io::Write, net::TcpListener};
+use std::{ io::Write, net::TcpListener};
 
 const MAX_BUFFER_SIZE: usize = 2048;
 
@@ -17,11 +17,19 @@ fn main() {
                 let buf = &buf[..len - 1];
                 let string = String::from_utf8(buf.to_vec()).expect("failed convert string");
                 let parts = string.split("\r\n").collect::<Vec<&str>>();
-                let part = parts[0].split(" ").collect::<Vec<&str>>()[1];
-                match part {
-                    "/" => {
+                let part = parts[0].split(' ').collect::<Vec<&str>>()[1];
+                let path = part.split('/').collect::<Vec<&str>>();
+                println!("{:?},{:?}", path, part);
+                match path[1] {
+                    "" => {
                         let _ = stream
                             .write(b"HTTP/1.1 200 OK\r\n\r\n")
+                            .expect("Error write stream");
+                    }
+                    "echo" => {
+                        let value = path[2];
+                        let _ = stream 
+                            .write(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",value.len(), value).as_bytes())
                             .expect("Error write stream");
                     }
                     _ => {
@@ -29,7 +37,7 @@ fn main() {
                             .write(b"HTTP/1.1 404 Not Found\r\n\r\n")
                             .expect("Error write stream");
                     }
-                };
+                }
             }
             Err(e) => {
                 println!("error: {}", e);

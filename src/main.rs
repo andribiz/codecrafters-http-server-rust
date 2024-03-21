@@ -188,7 +188,10 @@ fn read_request(stream: &TcpStream) -> Result<Request> {
 
 fn echo(req: Request) -> Response {
     let value = req.path.replace("/echo/", "");
-    let headers = HashMap::from([(String::from("content-length"), value.len().to_string())]);
+    let headers = HashMap::from([
+        (String::from("Content-Length"), value.len().to_string()),
+        (String::from("Content-Type"), String::from("text/plain")),
+    ]);
     Response {
         code: HTTPCode::OK,
         content: value,
@@ -199,8 +202,10 @@ fn echo(req: Request) -> Response {
 fn user_agent(req: Request) -> Response {
     match req.headers.get("User-Agent") {
         Some(value) => {
-            let headers =
-                HashMap::from([(String::from("content-length"), value.len().to_string())]);
+            let headers = HashMap::from([
+                (String::from("Content-Length"), value.len().to_string()),
+                (String::from("Content-Type"), String::from("text/plain")),
+            ]);
             Response {
                 code: HTTPCode::OK,
                 content: value.to_owned(),

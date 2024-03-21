@@ -92,9 +92,10 @@ impl Response {
         let mut buff = format!("HTTP/1.1 {}\r\n", self.code.to_string());
         if let Some(hashmap) = self.headers {
             for (key, value) in hashmap.into_iter() {
-                buff.push_str(format!("{}: {}\r\n\r\n", key, value).as_str());
+                buff.push_str(format!("{}: {}\r\n", key, value).as_str());
             }
         }
+        buff.push_str("\r\n");
         buff.push_str(self.content.as_str());
         buff.into_bytes()
     }

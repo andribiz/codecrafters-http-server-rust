@@ -292,11 +292,11 @@ async fn main() {
     println!("Logs from your program will appear here!");
     let args = env::args().collect::<Vec<String>>();
     let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
-    if args.len() != 3 && &args[1] != "--directory" {
-        println!("Missing params directory");
-        return;
+    let mut directory = String::from("");
+    if args.len() == 3 && &args[1] == "--directory" {
+        directory = args[2].clone();
     }
-    let mut routes = Routes::new(args[2].clone());
+    let mut routes = Routes::new(directory);
     routes.add(Route::new(
         "GET",
         "/",

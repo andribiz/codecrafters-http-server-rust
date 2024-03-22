@@ -1,8 +1,11 @@
 use anyhow::Result;
-use bytes::BytesMut;
-use std::collections::HashMap;
+use bytes::{BufMut, BytesMut};
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::str;
 use std::sync::Arc;
+use std::{collections::HashMap, env};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -10,15 +13,15 @@ use tokio::{
 
 const MAX_BUFFER_SIZE: usize = 2048;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum HttpMethod {
     GET,
     POST,
 }
 
-impl From<String> for HttpMethod {
-    fn from(value: String) -> Self {
-        match value.as_str() {
+impl From<&str> for HttpMethod {
+    fn from(value: &str) -> Self {
+        match value {
             "GET" => HttpMethod::GET,
             "POST" => HttpMethod::POST,
             _ => HttpMethod::GET,
@@ -36,7 +39,7 @@ struct Request {
 impl Request {
     fn parse_top(data: &str) -> (HttpMethod, String) {
         let parts = data.split(' ').collect::<Vec<&str>>();
-        let http_method = HttpMethod::from(parts[0].to_owned());
+        let http_method = HttpMethod::from(parts[0]);
         let path = parts[1].to_owned();
         (http_method, path)
     }
@@ -71,12 +74,12 @@ impl Request {
     }
 }
 
-enum HTTPCode {
+enum HttpCode {
     OK,
     NotFound,
 }
 
-impl ToString for HTTPCode {
+impl ToString for HttpCode {
     fn to_string(&self) -> String {
         match self {
             Self::OK => String::from("200 OK"),
@@ -86,22 +89,25 @@ impl ToString for HTTPCode {
 }
 
 struct Response {
-    pub code: HTTPCode,
-    pub content: String,
+    pub code: HttpCode,
+    pub content: Option<Vec<u8>>,
     pub headers: Option<HashMap<String, String>>,
 }
 
 impl Response {
     pub fn into_bytes(self) -> Vec<u8> {
-        let mut buff = format!("HTTP/1.1 {}\r\n", self.code.to_string());
+        let mut buff = vec![];
+        buff.put(format!("HTTP/1.1 {}\r\n", self.code.to_string()).as_bytes());
         if let Some(hashmap) = self.headers {
             for (key, value) in hashmap.into_iter() {
-                buff.push_str(format!("{}: {}\r\n", key, value).as_str());
+                buff.put(format!("{}: {}\r\n", key, value).as_bytes());
             }
         }
-        buff.push_str("\r\n");
-        buff.push_str(self.content.as_str());
-        buff.into_bytes()
+        buff.put(&b"\r\n"[..]);
+        if let Some(content) = self.content {
+            buff.put(content.as_slice());
+        }
+        buff
     }
 }
 
@@ -110,16 +116,18 @@ enum CompareType {
     Exact,
 }
 
-type FnRoute = Box<dyn Fn(Request) -> Response + Send + Sync>;
+type FnRoute = Box<dyn Fn(Request, &String) -> Response + Send + Sync>;
 struct Route {
     pub path: String,
+    method: HttpMethod,
     compare_type: CompareType,
     handler: FnRoute,
 }
 
 impl Route {
-    pub fn new(path: &str, compare_type: CompareType, handler: FnRoute) -> Self {
+    pub fn new(method: &str, path: &str, compare_type: CompareType, handler: FnRoute) -> Self {
         Route {
+            method: HttpMethod::from(method),
             path: path.to_owned(),
             compare_type,
             handler,
@@ -129,14 +137,14 @@ impl Route {
     pub fn matches(&self, req: &Request) -> Option<&FnRoute> {
         match self.compare_type {
             CompareType::Exact => {
-                if self.path == req.path {
+                if self.path == req.path && self.method == req.method {
                     Some(&self.handler)
                 } else {
                     None
                 }
             }
             CompareType::Prefix => {
-                if req.path.starts_with(&self.path) {
+                if req.path.starts_with(&self.path) && self.method == req.method {
                     Some(&self.handler)
                 } else {
                     None
@@ -148,11 +156,15 @@ impl Route {
 
 struct Routes {
     routes: Vec<Route>,
+    directory: String,
 }
 
 impl Routes {
-    pub fn new() -> Self {
-        Self { routes: Vec::new() }
+    pub fn new(directory: String) -> Self {
+        Self {
+            routes: Vec::new(),
+            directory,
+        }
     }
 
     pub fn add(&mut self, route: Route) {
@@ -162,14 +174,14 @@ impl Routes {
     pub async fn execute(&self, stream: &mut TcpStream, req: Request) {
         for route in self.routes.iter() {
             if let Some(handler) = route.matches(&req) {
-                let res = handler(req);
+                let res = handler(req, &self.directory);
                 Routes::send_response(stream, res).await;
                 return;
             }
         }
         let res = Response {
-            code: HTTPCode::NotFound,
-            content: String::from(""),
+            code: HttpCode::NotFound,
+            content: None,
             headers: None,
         };
         Routes::send_response(stream, res).await;
@@ -191,20 +203,20 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request> {
     Request::parse(buf)
 }
 
-fn echo(req: Request) -> Response {
+fn echo(req: Request, _directory: &String) -> Response {
     let value = req.path.replace("/echo/", "");
     let headers = HashMap::from([
         (String::from("Content-Length"), value.len().to_string()),
         (String::from("Content-Type"), String::from("text/plain")),
     ]);
     Response {
-        code: HTTPCode::OK,
-        content: value,
+        code: HttpCode::OK,
+        content: Some(value.into_bytes()),
         headers: Some(headers),
     }
 }
 
-fn user_agent(req: Request) -> Response {
+fn user_agent(req: Request, _directory: &String) -> Response {
     match req.headers.get("User-Agent") {
         Some(value) => {
             let headers = HashMap::from([
@@ -212,14 +224,64 @@ fn user_agent(req: Request) -> Response {
                 (String::from("Content-Type"), String::from("text/plain")),
             ]);
             Response {
-                code: HTTPCode::OK,
-                content: value.to_owned(),
+                code: HttpCode::OK,
+                content: Some(value.to_owned().into_bytes()),
                 headers: Some(headers),
             }
         }
         None => Response {
-            code: HTTPCode::OK,
-            content: String::from(""),
+            code: HttpCode::OK,
+            content: None,
+            headers: None,
+        },
+    }
+}
+
+fn get_file(req: Request, directory: &String) -> Response {
+    let Some(filename) = req.path.strip_prefix("/files/") else {
+        return Response {
+            code: HttpCode::NotFound,
+            content: None,
+            headers: None,
+        };
+    };
+    let filename = format!("/{}/{}", &directory, filename);
+    let path_filename = Path::new(&filename);
+    if !path_filename.exists() {
+        return Response {
+            code: HttpCode::NotFound,
+            content: None,
+            headers: None,
+        };
+    }
+    match File::open(path_filename) {
+        Ok(mut f) => {
+            let mut buf = vec![];
+            match f.read_to_end(&mut buf) {
+                Ok(len) => {
+                    let headers = HashMap::from([
+                        (String::from("Content-Length"), len.to_string()),
+                        (
+                            String::from("Content-Type"),
+                            String::from("application/octet-stream"),
+                        ),
+                    ]);
+                    Response {
+                        code: HttpCode::OK,
+                        content: Some(buf),
+                        headers: Some(headers),
+                    }
+                }
+                Err(_) => Response {
+                    code: HttpCode::NotFound,
+                    content: None,
+                    headers: None,
+                },
+            }
+        }
+        Err(_) => Response {
+            code: HttpCode::NotFound,
+            content: None,
             headers: None,
         },
     }
@@ -228,24 +290,42 @@ fn user_agent(req: Request) -> Response {
 #[tokio::main]
 async fn main() {
     println!("Logs from your program will appear here!");
-
+    let args = env::args().collect::<Vec<String>>();
     let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
-    let mut routes = Routes::new();
+    if args.len() != 3 && &args[1] != "--directory" {
+        println!("Missing params directory");
+        return;
+    }
+    let mut routes = Routes::new(args[2].clone());
     routes.add(Route::new(
+        "GET",
         "/",
         CompareType::Exact,
-        Box::new(|_| Response {
-            code: HTTPCode::OK,
+        Box::new(|_, _| Response {
+            code: HttpCode::OK,
             headers: None,
-            content: String::from(""),
+            content: None,
         }),
     ));
-    routes.add(Route::new("/echo", CompareType::Prefix, Box::new(echo)));
     routes.add(Route::new(
+        "GET",
+        "/echo",
+        CompareType::Prefix,
+        Box::new(echo),
+    ));
+    routes.add(Route::new(
+        "GET",
         "/user-agent",
         CompareType::Exact,
         Box::new(user_agent),
     ));
+    routes.add(Route::new(
+        "GET",
+        "/files",
+        CompareType::Prefix,
+        Box::new(get_file),
+    ));
+
     let arc_routes = Arc::new(routes);
 
     loop {

@@ -1,8 +1,12 @@
 use anyhow::Result;
+use bytes::BytesMut;
 use std::collections::HashMap;
-use std::net::TcpStream;
 use std::str;
-use std::{io::Write, net::TcpListener};
+use std::sync::Arc;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 
 const MAX_BUFFER_SIZE: usize = 2048;
 
@@ -106,7 +110,7 @@ enum CompareType {
     Exact,
 }
 
-type FnRoute = Box<dyn Fn(Request) -> Response>;
+type FnRoute = Box<dyn Fn(Request) -> Response + Send + Sync>;
 struct Route {
     pub path: String,
     compare_type: CompareType,
@@ -155,11 +159,11 @@ impl Routes {
         self.routes.push(route);
     }
 
-    pub fn execute(&self, stream: &mut TcpStream, req: Request) {
+    pub async fn execute(&self, stream: &mut TcpStream, req: Request) {
         for route in self.routes.iter() {
             if let Some(handler) = route.matches(&req) {
                 let res = handler(req);
-                Routes::send_response(stream, res);
+                Routes::send_response(stream, res).await;
                 return;
             }
         }
@@ -168,20 +172,21 @@ impl Routes {
             content: String::from(""),
             headers: None,
         };
-        Routes::send_response(stream, res);
+        Routes::send_response(stream, res).await;
     }
 
-    fn send_response(stream: &mut TcpStream, data: Response) {
-        let res = stream.write(&data.into_bytes());
+    async fn send_response(stream: &mut TcpStream, data: Response) {
+        let res = stream.write_all(&data.into_bytes()).await;
         if let Err(err) = res {
             println!("Error sending response: {}", err);
         }
     }
 }
 
-fn read_request(stream: &TcpStream) -> Result<Request> {
-    let mut buf = [0; MAX_BUFFER_SIZE];
-    let len = stream.peek(&mut buf).expect("peek failed");
+async fn read_request(stream: &mut TcpStream) -> Result<Request> {
+    let mut buf = BytesMut::with_capacity(MAX_BUFFER_SIZE);
+    let len = stream.read_buf(&mut buf).await?;
+
     let buf = &buf[..len - 1];
     Request::parse(buf)
 }
@@ -220,10 +225,11 @@ fn user_agent(req: Request) -> Response {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("Logs from your program will appear here!");
 
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
     let mut routes = Routes::new();
     routes.add(Route::new(
         "/",
@@ -240,25 +246,26 @@ fn main() {
         CompareType::Exact,
         Box::new(user_agent),
     ));
+    let arc_routes = Arc::new(routes);
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
+    loop {
+        match listener.accept().await {
+            Ok((mut stream, _)) => {
                 println!("accepted new connection");
+                let routes_clone = arc_routes.clone();
+                tokio::spawn(async move {
+                    let req = match read_request(&mut stream).await {
+                        Ok(val) => val,
+                        Err(err) => {
+                            println!("error read request: {}", err);
+                            return;
+                        }
+                    };
 
-                let req = match read_request(&stream) {
-                    Ok(val) => val,
-                    Err(err) => {
-                        println!("error read request: {}", err);
-                        return;
-                    }
-                };
-
-                routes.execute(&mut stream, req);
+                    routes_clone.execute(&mut stream, req).await;
+                });
             }
-            Err(e) => {
-                println!("error: {}", e);
-            }
+            Err(e) => println!("Error: {}", e),
         }
     }
 }

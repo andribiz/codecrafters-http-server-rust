@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bytes::{BufMut, BytesMut};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::str;
 use std::sync::Arc;
@@ -34,6 +34,7 @@ struct Request {
     pub path: String,
     pub method: HttpMethod,
     pub headers: HashMap<String, String>,
+    pub content: Option<String>,
 }
 
 impl Request {
@@ -66,10 +67,17 @@ impl Request {
         let (method, path) = Request::parse_top(parts[0]);
         let headers = Request::parse_header(parts[1..].to_vec());
 
+        let content = if lines[1].len() > 0 {
+            Some(lines[1].to_owned())
+        } else {
+            None
+        };
+
         Ok(Request {
             method,
             path,
             headers,
+            content,
         })
     }
 }
@@ -77,6 +85,7 @@ impl Request {
 enum HttpCode {
     OK,
     NotFound,
+    Created,
 }
 
 impl ToString for HttpCode {
@@ -84,6 +93,7 @@ impl ToString for HttpCode {
         match self {
             Self::OK => String::from("200 OK"),
             Self::NotFound => String::from("404 Not Found"),
+            Self::Created => String::from("201 Created"),
         }
     }
 }
@@ -197,9 +207,10 @@ impl Routes {
 
 async fn read_request(stream: &mut TcpStream) -> Result<Request> {
     let mut buf = BytesMut::with_capacity(MAX_BUFFER_SIZE);
-    let len = stream.read_buf(&mut buf).await?;
+    let _ = stream.read_buf(&mut buf).await?;
 
-    let buf = &buf[..len - 1];
+    let buf = &buf;
+    println!("{:?}", String::from_utf8(buf.to_vec()));
     Request::parse(buf)
 }
 
@@ -287,6 +298,40 @@ fn get_file(req: Request, directory: &String) -> Response {
     }
 }
 
+fn post_file(req: Request, directory: &String) -> Response {
+    let Some(filename) = req.path.strip_prefix("/files/") else {
+        return Response {
+            code: HttpCode::NotFound,
+            content: None,
+            headers: None,
+        };
+    };
+    let filename = format!("/{}/{}", &directory, filename);
+    let path_filename = Path::new(&filename);
+    match File::create(path_filename) {
+        Ok(mut f) => {
+            let data = req.content.unwrap();
+            match f.write_all(data.as_bytes()) {
+                Ok(_) => Response {
+                    code: HttpCode::Created,
+                    content: None,
+                    headers: None,
+                },
+                Err(_) => Response {
+                    code: HttpCode::NotFound,
+                    content: None,
+                    headers: None,
+                },
+            }
+        }
+        Err(_) => Response {
+            code: HttpCode::NotFound,
+            content: None,
+            headers: None,
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() {
     println!("Logs from your program will appear here!");
@@ -325,6 +370,12 @@ async fn main() {
         CompareType::Prefix,
         Box::new(get_file),
     ));
+    routes.add(Route::new(
+        "POST",
+        "/files",
+        CompareType::Prefix,
+        Box::new(post_file),
+    ));
 
     let arc_routes = Arc::new(routes);
 
@@ -341,6 +392,7 @@ async fn main() {
                             return;
                         }
                     };
+                    println!("{:?}", req);
 
                     routes_clone.execute(&mut stream, req).await;
                 });
